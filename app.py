@@ -3,6 +3,7 @@ import os
 import pg8000.native
 import requests
 import re
+import random
 from urllib.parse import urljoin
 from functools import lru_cache
 
@@ -11,15 +12,23 @@ app = Flask(__name__)
 DATABASE_URL = os.environ.get("DATABASE_URL")
 PROXY_TARGET = "https://samokat.ru"
 
-# Твой прокси (можно добавить список и рандомить)
-PROXY = "socks5://0ktuhalt9j-res-country-RU-state-536203-city-498817-hold-session-session-69b3036213658:BHOdByDtlrFaqcH0@62.112.8.229:443"
-PROXIES = {"http": PROXY, "https": PROXY}
+# Список прокси — добавляй свои
+PROXY_LIST = [
+    "socks5://0ktuhalt9j-res-country-RU-state-536203-city-498817-hold-session-session-69b3036213658:BHOdByDtlrFaqcH0@62.112.8.229:443",
+    # "socks5://login2:pass2@ip2:port2",
+    # "socks5://login3:pass3@ip3:port3",
+]
+
+def get_random_proxy():
+    proxy_str = random.choice(PROXY_LIST)
+    return {"http": proxy_str, "https": proxy_str}
 
 @lru_cache(maxsize=512)
 def get_cached_resource(path):
     try:
+        proxies = get_random_proxy()
         url = urljoin(PROXY_TARGET, path)
-        resp = requests.get(url, proxies=PROXIES, timeout=(2, 6))
+        resp = requests.get(url, proxies=proxies, timeout=(2, 5))
         if resp.status_code in (200, 304):
             return resp.content, resp.headers.get("content-type", "application/octet-stream")
     except:
@@ -55,13 +64,13 @@ def proxy(path):
     key = request.args.get("key") or request.cookies.get("sk_key")
     print(f"Proxy called: path={path}, key={key}")
 
-    # Без ключа — статика из кэша или быстрый фейл
+    # Быстрый fail без ключа — спасает от спама
     if not key:
         if path in ["favicon.ico", "apple-touch-icon.png"] or path.endswith((".ico", ".png", ".css", ".js", ".svg", ".woff", ".ttf")):
             content, ct = get_cached_resource(path)
             return Response(content, mimetype=ct or "application/octet-stream", status=200 if content else 404)
-        return "Нет ключа (?key=XXXX или куки sk_key)", 401
-    
+        return Response("Нет ключа", status=401)
+
     session_token = get_session_token(key)
     if not session_token:
         return "Токен не найден или просрочен", 403
@@ -87,6 +96,7 @@ def proxy(path):
             return Response(content, mimetype=ct)
     
     try:
+        proxies = get_random_proxy()
         resp = requests.request(
             method=request.method,
             url=target_url,
@@ -94,11 +104,11 @@ def proxy(path):
             cookies=proxy_cookies,
             data=request.get_data(),
             allow_redirects=False,
-            timeout=(4, 12),
-            proxies=PROXIES
+            timeout=(4, 10),  # агрессивно короткий таймаут
+            proxies=proxies
         )
         
-        print(f"Samokat status: {resp.status_code} через прокси для {target_url}")
+        print(f"Samokat status: {resp.status_code} через {proxies['https']} для {target_url}")
         
         if 300 <= resp.status_code < 400 and "location" in resp.headers:
             loc = resp.headers["location"]
@@ -133,7 +143,7 @@ def proxy(path):
         return Response(content, status=resp.status_code, headers=response_headers)
     
     except requests.Timeout:
-        return "Samokat тормозит — попробуй позже", 504
+        return "Samokat таймаутит", 504
     except Exception as e:
         print(f"Proxy error: {str(e)}")
         return f"Ошибка прокси: {str(e)}", 502
@@ -145,7 +155,7 @@ def activate():
         return "Ключ обязателен", 400
     
     resp = make_response(redirect("/?key=" + key))
-    resp.set_cookie("sk_key", key, max_age=86400, secure=True, httponly=True, samesite="Lax")
+    resp.set_cookie("sk_key", key, max_age=86400, secure=True, httponly=False, samesite="None")  # httponly=False для теста, чтобы JS видел куки
     return resp
 
 @app.route("/api/<path:path>")
@@ -174,6 +184,7 @@ def api_proxy(path):
     headers["Referer"] = "https://samokat.ru/"
     
     try:
+        proxies = get_random_proxy()
         resp = requests.request(
             method=request.method,
             url=target_url,
@@ -181,11 +192,11 @@ def api_proxy(path):
             cookies=proxy_cookies,
             data=request.get_data(),
             allow_redirects=False,
-            timeout=(4, 12),
-            proxies=PROXIES
+            timeout=(4, 10),
+            proxies=proxies
         )
         
-        print(f"API status: {resp.status_code} для {target_url}")
+        print(f"API status: {resp.status_code} через {proxies['https']} для {target_url}")
         
         return Response(resp.content, status=resp.status_code, headers=dict(resp.headers))
     except Exception as e:
