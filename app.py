@@ -118,10 +118,11 @@ def proxy(path):
     if qs:
         target_url += "?" + qs
 
-    headers = {k: v for k, v in request.headers.items() if k.lower() not in ["host", "content-length"]}
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in ["host", "content-length", "connection", "keep-alive"]}
     headers["Host"] = "samokat.ru"
     headers["Referer"] = "https://samokat.ru/"
     headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    headers["Connection"] = "close"
 
     if any(ext in path.lower() for ext in [".css", ".js", ".ico", ".png", ".jpg", ".svg", ".woff", ".ttf"]):
         content, ct = get_cached_resource("/" + path)
@@ -131,7 +132,9 @@ def proxy(path):
     try:
         proxies = get_random_proxy()
         print(f"→ {request.method} {target_url} via {list(proxies.values())[0]}")
-        resp = requests.request(
+        session = requests.Session()
+        session.keep_alive = False
+        resp = session.request(
             method=request.method,
             url=target_url,
             headers=headers,
@@ -141,6 +144,7 @@ def proxy(path):
             timeout=(5, 30),
             proxies=proxies
         )
+        session.close()
 
         print(f"← {resp.status_code} [{resp.headers.get('content-type','')}] {len(resp.content)}b")
 
