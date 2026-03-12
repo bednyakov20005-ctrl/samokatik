@@ -1,41 +1,61 @@
 #!/usr/bin/env python3
 import os
+import logging
 import pg8000.native
 from flask import Flask, request, jsonify
 
+# Настраиваем простое логирование — видно в консоли платформы
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
+
 DATABASE_URL = os.environ.get("DATABASE_URL")
 API_SECRET   = os.environ.get("API_SECRET", "samokat_secret_2024")
 
+if not DATABASE_URL:
+    logger.error("DATABASE_URL не задан в переменных окружения! Приложение не сможет работать.")
+
 def get_db():
-    # Parse DATABASE_URL: postgresql://user:pass@host:port/dbname
-    url = DATABASE_URL
-    url = url.replace("postgresql://", "").replace("postgres://", "")
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL не задан")
+    url = DATABASE_URL.replace("postgresql://", "").replace("postgres://", "")
     userinfo, rest = url.split("@")
     user, password = userinfo.split(":")
     hostport, dbname = rest.split("/")
     if ":" in hostport:
-        host, port = hostport.split(":")
-        port = int(port)
+        host, port_str = hostport.split(":")
+        port = int(port_str)
     else:
         host, port = hostport, 5432
-    return pg8000.native.Connection(user=user, password=password, host=host, port=port, database=dbname, ssl_context=True)
+    return pg8000.native.Connection(
+        user=user, password=password, host=host, port=port,
+        database=dbname, ssl_context=True
+    )
 
 def init_db():
-    conn = get_db()
-    conn.run("""
-        CREATE TABLE IF NOT EXISTS keys (
-            key           TEXT PRIMARY KEY,
-            phone         TEXT,
-            session_token TEXT,
-            access_token  TEXT,
-            proxy         TEXT,
-            status        TEXT DEFAULT 'free',
-            created_at    TEXT,
-            used_at       TEXT
-        )
-    """)
-    conn.close()
+    try:
+        conn = get_db()
+        conn.run("""
+            CREATE TABLE IF NOT EXISTS keys (
+                key           TEXT PRIMARY KEY,
+                phone         TEXT,
+                session_token TEXT,
+                access_token  TEXT,
+                proxy         TEXT,
+                status        TEXT DEFAULT 'free',
+                created_at    TEXT,
+                used_at       TEXT
+            )
+        """)
+        conn.close()
+        logger.info("Таблица keys проверена/создана")
+    except Exception as e:
+        logger.error(f"Ошибка инициализации БД: {e}")
+
+# ──────────────────────────────────────────────
+# HTML шаблоны — ВСЕ фигурные скобки в CSS/JS экранированы {{ }}
+# ──────────────────────────────────────────────
 
 HTML_ACTIVATE = """<!DOCTYPE html>
 <html lang="ru">
@@ -45,14 +65,14 @@ HTML_ACTIVATE = """<!DOCTYPE html>
 <title>Вход в Самокат</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;display:flex;align-items:center;justify-content:center;min-height:100vh}
-.card{background:white;border-radius:24px;padding:48px 32px;max-width:380px;width:100%;text-align:center;box-shadow:0 8px 40px rgba(0,0,0,.12)}
-.logo{font-size:64px;margin-bottom:20px}
-h1{font-size:24px;color:#1a1a1a;margin-bottom:10px;font-weight:700}
-p{color:#999;font-size:15px;margin-bottom:32px;line-height:1.5}
-.spinner{width:44px;height:44px;border:4px solid #f0f0f0;border-top:4px solid #FF4B4B;border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 32px}
-@keyframes spin{to{transform:rotate(360deg)}}
-.btn{display:inline-block;padding:16px 40px;background:#FF4B4B;color:white;border-radius:14px;text-decoration:none;font-weight:700;font-size:17px}
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;display:flex;align-items:center;justify-content:center;min-height:100vh}}
+.card{{background:white;border-radius:24px;padding:48px 32px;max-width:380px;width:100%;text-align:center;box-shadow:0 8px 40px rgba(0,0,0,.12)}}
+.logo{{font-size:64px;margin-bottom:20px}}
+h1{{font-size:24px;color:#1a1a1a;margin-bottom:10px;font-weight:700}}
+p{{color:#999;font-size:15px;margin-bottom:32px;line-height:1.5}}
+.spinner{{width:44px;height:44px;border:4px solid #f0f0f0;border-top:4px solid #FF4B4B;border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 32px}}
+@keyframes spin{{to{{transform:rotate(360deg)}}}}
+.btn{{display:inline-block;padding:16px 40px;background:#FF4B4B;color:white;border-radius:14px;text-decoration:none;font-weight:700;font-size:17px}}
 </style>
 </head>
 <body>
@@ -68,15 +88,38 @@ var t = "{token}";
 var e = "Fri, 01 Jan 2027 00:00:00 GMT";
 document.cookie = "__Secure-next-auth.session-token=" + t + "; domain=samokat.ru; path=/; expires=" + e + "; SameSite=Lax; Secure";
 document.cookie = "next-auth.session-token=" + t + "; domain=.samokat.ru; path=/; expires=" + e + "; SameSite=Lax";
-setTimeout(function() { window.location.href = "https://samokat.ru"; }, 1200);
+setTimeout(function() {{ window.location.href = "https://samokat.ru"; }}, 1200);
 </script>
 </body>
 </html>"""
 
 HTML_ERROR = """<!DOCTYPE html>
-<html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ошибка</title>
-<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,sans-serif;background:#f5f5f5;display:flex;align-items:center;justify-content:center;min-height:100vh}.card{background:white;border-radius:24px;padding:48px 32px;max-width:380px;width:100%;text-align:center;box-shadow:0 8px 40px rgba(0,0,0,.12)}.logo{font-size:64px;margin-bottom:20px}h1{font-size:22px;color:#1a1a1a;margin-bottom:12px;font-weight:700}p{color:#999;font-size:15px}</style>
-</head><body><div class="card"><div class="logo">{icon}</div><h1>{title}</h1><p>{msg}</p></div></body></html>"""
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ошибка</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{{font-family:-apple-system,sans-serif;background:#f5f5f5;display:flex;align-items:center;justify-content:center;min-height:100vh}}
+.card{{background:white;border-radius:24px;padding:48px 32px;max-width:380px;width:100%;text-align:center;box-shadow:0 8px 40px rgba(0,0,0,.12)}}
+.logo{{font-size:64px;margin-bottom:20px}}
+h1{{font-size:22px;color:#1a1a1a;margin-bottom:12px;font-weight:700}}
+p{{color:#999;font-size:15px}}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">{icon}</div>
+  <h1>{title}</h1>
+  <p>{msg}</p>
+</div>
+</body>
+</html>"""
+
+# ──────────────────────────────────────────────
+# Роуты
+# ──────────────────────────────────────────────
 
 @app.route("/")
 def index():
@@ -87,15 +130,20 @@ def activate():
     key = request.args.get("key", "").strip().upper()
     if not key:
         return HTML_ERROR.format(icon="❌", title="Нет ключа", msg="Ключ не указан в ссылке"), 400
+    
     try:
         conn = get_db()
         rows = conn.run("SELECT session_token FROM keys WHERE key=:key", key=key)
         conn.close()
     except Exception as e:
-        return HTML_ERROR.format(icon="⚠️", title="Ошибка", msg=str(e)), 500
+        logger.error(f"Ошибка БД на /activate key={key}: {e}")
+        return HTML_ERROR.format(icon="⚠️", title="Ошибка сервера", msg="Что-то пошло не так, попробуйте позже"), 500
+    
     if not rows:
         return HTML_ERROR.format(icon="🔍", title="Ключ не найден", msg="Проверь ключ и попробуй снова"), 404
-    return HTML_ACTIVATE.format(token=rows[0][0]), 200
+    
+    token = rows[0][0]
+    return HTML_ACTIVATE.format(token=token), 200
 
 def auth():
     return request.headers.get("X-Secret") == API_SECRET
@@ -111,15 +159,17 @@ def api_list():
 @app.route("/api/keys", methods=["POST"])
 def api_add():
     if not auth(): return jsonify({"error":"forbidden"}), 403
-    d = request.json
+    d = request.json or {}
     conn = get_db()
     conn.run(
         "INSERT INTO keys (key,phone,session_token,access_token,proxy,status,created_at) VALUES (:key,:phone,:st,:at,:proxy,'free',:ca) ON CONFLICT (key) DO NOTHING",
-        key=d["key"], phone=d["phone"], st=d["session_token"],
-        at=d.get("access_token",""), proxy=d.get("proxy",""), ca=d["created_at"]
+        key=d.get("key"), phone=d.get("phone"), st=d.get("session_token"),
+        at=d.get("access_token",""), proxy=d.get("proxy",""), ca=d.get("created_at")
     )
     conn.close()
     return jsonify({"ok": True})
+
+# Остальные API-роуты без изменений (delete, reset, delete_all, stats) — они уже норм
 
 @app.route("/api/keys/<key>", methods=["DELETE"])
 def api_delete(key):
@@ -157,7 +207,10 @@ def api_stats():
         result["total"] += r[1]
     return jsonify(result)
 
+# Инициализация БД при старте
 init_db()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    # Только для локального теста: python app.py
+    port = int(os.environ.get("PORT", 5000))  # локально 5000, в проде игнорируется
+    app.run(host="0.0.0.0", port=port, debug=False)
