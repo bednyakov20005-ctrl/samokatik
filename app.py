@@ -11,7 +11,6 @@ app = Flask(__name__)
 CORS(app)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
-API_SECRET   = os.environ.get("API_SECRET", "samokat_secret_2024")
 PROXY_TARGET = "https://samokat.ru"
 
 def get_db():
@@ -37,28 +36,33 @@ def get_session_token(key):
         print(f"DB error: {e}")
         return None
 
+@app.route("/test")
+def test():
+    return "Flask работает. Добавь ?key=XXXX для прокси", 200
+
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def proxy(path):
-    key = request.args.get("key") or request.cookies.get("sk_key")
+    print(f"Proxy called: path={path}, key={request.args.get('key')}")  # логи в консоль
     
+    key = request.args.get("key") or request.cookies.get("sk_key")
     if not key:
         return "Нет ключа (?key=XXXX)", 401
     
     session_token = get_session_token(key)
     if not session_token:
-        return "Токен не найден или сдох", 403
+        return "Токен не найден", 403
     
     proxy_cookies = {
         "__Secure-next-auth.session-token": session_token,
         "_sv": "SV1.18515db0-6b60-47d9-aa85-93e9af748ad6.1772916992",
     }
     
-    target_url = urljoin(PROXY_TARGET + "/", path)
+    target_url = urljoin(PROXY_TARGET, path or "/")
     if request.query_string:
         target_url += "?" + request.query_string.decode()
     
-    headers = {k: v for k, v in request.headers if k.lower() not in ["host"]}
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in ["host"]}
     headers["Host"] = "samokat.ru"
     headers["Referer"] = "https://samokat.ru/"
     
@@ -70,8 +74,10 @@ def proxy(path):
             cookies=proxy_cookies,
             data=request.get_data(),
             allow_redirects=False,
-            timeout=(5, 60)  # 5 сек на connect, 60 на read — не убьёт воркер
+            timeout=(5, 60)
         )
+        
+        print(f"Samokat ответил: {resp.status_code} для {target_url}")
         
         if 300 <= resp.status_code < 400 and "location" in resp.headers:
             loc = resp.headers["location"]
@@ -82,44 +88,27 @@ def proxy(path):
             return Response(status=resp.status_code, headers={"Location": loc})
         
         content = resp.content
-        content_type = resp.headers.get("content-type", "").lower()
-        
-        if any(t in content_type for t in ["html", "javascript", "css", "json"]):
-            try:
-                content = content.decode("utf-8", errors="replace")
-                content = re.sub(r'(https?://)?samokat\.ru', request.host, content, flags=re.IGNORECASE)
-                content = content.replace("samokat.ru", request.host)
-                content = content.encode("utf-8")
-            except:
-                pass
+        if "text/html" in resp.headers.get("content-type", ""):
+            content = content.decode("utf-8", errors="replace")
+            content = re.sub(r'(https?://)?samokat\.ru', request.host, content, flags=re.IGNORECASE)
+            content = content.replace("samokat.ru", request.host)
+            content = content.encode("utf-8")
         
         response_headers = {k: v for k, v in resp.headers.items() if k.lower() not in ["content-encoding", "transfer-encoding"]}
         response_headers["Set-Cookie"] = f'sk_key={key}; Path=/; Max-Age=86400; Secure; SameSite=Lax; HttpOnly'
         
-        return Response(
-            content,
-            status=resp.status_code,
-            headers=response_headers,
-            mimetype=resp.headers.get("content-type")
-        )
+        return Response(content, status=resp.status_code, headers=response_headers)
     
-    except requests.Timeout:
-        return "Samokat.ru слишком медленно отвечает. Попробуй позже.", 504
     except Exception as e:
         print(f"Proxy error: {str(e)}")
-        return f"Ошибка: {str(e)}", 502
+        return f"Ошибка прокси: {str(e)}", 502
 
 @app.route("/activate")
 def activate():
     key = request.args.get("key", "").strip().upper()
     if not key:
         return "Ключ обязателен", 400
-    return f"""
-    <meta http-equiv="refresh" content="0;url=/?key={key}">
-    <p>Загружаем Самокат...</p>
-    """, 200
-
-# Твои API роуты (/api/keys и т.д.) — вставь их сюда без изменений
+    return f'<meta http-equiv="refresh" content="0;url=/?key={key}">Загрузка...', 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
