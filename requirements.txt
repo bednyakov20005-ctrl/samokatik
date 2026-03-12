@@ -3,3 +3,4 @@ gunicorn==21.2.0
 pg8000==1.31.1
 requests[socks]==2.32.3
 flask-cors==5.0.0
+PySocks==1.7.1
