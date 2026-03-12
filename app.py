@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 import os
 import pg8000.native
-import httpx
+import requests
 import re
-from flask import Flask, request, Response, stream_with_context
+from flask import Flask, request, Response
 from flask_cors import CORS
 from urllib.parse import urljoin, urlparse
 
@@ -43,17 +43,16 @@ def proxy(path):
     key = request.args.get("key") or request.cookies.get("sk_key")
     
     if not key:
-        return "Нет ключа. Добавь ?key=XXXX в URL или войди через бота", 401
+        return "Нет ключа в URL (?key=XXXX) или куки. Введи через бота.", 401
     
     session_token = get_session_token(key)
     if not session_token:
-        return "Ключ недействителен или токен сдох. Попробуй другой.", 403
+        return "Ключ недействителен или токен просрочен.", 403
     
-    # Куки, которые подставляем в каждый запрос
     proxy_cookies = {
         "__Secure-next-auth.session-token": session_token,
         "_sv": "SV1.18515db0-6b60-47d9-aa85-93e9af748ad6.1772916992",  # из твоего дампа
-        # Добавь сюда другие куки из дампа, если нужно: spid, spjs, adtech_uid и т.д.
+        # Добавь сюда остальные куки из дампа, если нужно
     }
     
     target_url = urljoin(PROXY_TARGET + "/", path)
@@ -65,25 +64,21 @@ def proxy(path):
         if k.lower() not in ["host", "content-length", "transfer-encoding", "connection"]
     }
     headers["Host"] = "samokat.ru"
-    headers["Referer"] = "https://samokat.ru/"  # помогает обходить детект
+    headers["Referer"] = "https://samokat.ru/"
+    headers["User-Agent"] = request.headers.get("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
     
     try:
-        client = httpx.Client(
-            cookies=proxy_cookies,
-            follow_redirects=False,          # ← ключевой фикс
-            timeout=30.0,
-            http2=True
-        )
-        
-        resp = client.request(
+        resp = requests.request(
             method=request.method,
             url=target_url,
             headers=headers,
-            content=request.get_data(),
-            follow_redirects=False           # ← здесь тоже
+            cookies=proxy_cookies,
+            data=request.get_data(),
+            allow_redirects=False,
+            timeout=(5, 45)  # connect 5 сек, read 45 сек — чтобы не таймаутить
         )
         
-        # Обрабатываем редиректы вручную
+        # Ручная обработка редиректов
         if 300 <= resp.status_code < 400 and "location" in resp.headers:
             loc = resp.headers["location"]
             if loc.startswith("/"):
@@ -93,77 +88,69 @@ def proxy(path):
                 loc = loc.replace("http://samokat.ru", request.host_url.rstrip("/"))
             return Response(status=resp.status_code, headers={"Location": loc})
         
-        def generate():
-            for chunk in resp.iter_bytes(chunk_size=8192):
-                yield chunk
-        
+        content = resp.content
         content_type = resp.headers.get("content-type", "").lower()
-        is_text = any(t in content_type for t in ["html", "javascript", "css", "json"])
         
-        excluded_headers = ["content-encoding", "content-length", "transfer-encoding", "connection"]
-        response_headers = [(k, v) for k, v in resp.headers.items() if k.lower() not in excluded_headers]
-        
-        if is_text:
+        if any(t in content_type for t in ["html", "javascript", "css", "json"]):
             try:
-                content = b"".join(generate()).decode("utf-8", errors="replace")
+                content = content.decode("utf-8", errors="replace")
                 
-                # Жёсткая замена всех ссылок на samokat.ru
+                # Подмена доменов
                 content = re.sub(r'(https?://)?samokat\.ru', request.host, content, flags=re.IGNORECASE)
                 content = content.replace("samokat.ru", request.host)
                 content = content.replace("//samokat.ru", "//" + request.host)
                 content = content.replace("https://api-web.samokat.ru", request.host_url.rstrip("/"))
                 
-                # Сохраняем ключ в куки, чтобы в следующий раз не требовался ?key=
-                sk_key_cookie = f'sk_key={key}; Path=/; Max-Age=86400; Secure; SameSite=Lax; HttpOnly'
-                response_headers.append(("Set-Cookie", sk_key_cookie))
-                
-                return Response(
-                    content.encode("utf-8"),
-                    status=resp.status_code,
-                    headers=dict(response_headers),
-                    mimetype=resp.headers.get("content-type")
-                )
-            except Exception as decode_err:
-                print(f"Decode error: {decode_err}")
-                # Если не удалось декодировать — просто стрим как есть
-                pass
+                content = content.encode("utf-8")
+            except Exception as e:
+                print(f"Content decode error: {e}")
         
-        # Для бинарки (картинки, видео, шрифты) — стрим
+        response_headers = {
+            k: v for k, v in resp.headers.items()
+            if k.lower() not in ["content-encoding", "transfer-encoding", "connection"]
+        }
+        
+        # Сохраняем ключ в куки для будущих заходов без ?key
+        response_headers["Set-Cookie"] = f'sk_key={key}; Path=/; Max-Age=86400; Secure; SameSite=Lax; HttpOnly'
+        
         return Response(
-            stream_with_context(generate()),
+            content,
             status=resp.status_code,
-            headers=dict(response_headers)
+            headers=response_headers,
+            mimetype=resp.headers.get("content-type")
         )
     
-    except Exception as e:
-        print(f"Proxy error: {str(e)}")
-        return f"Прокси сломался: {str(e)}", 502
+    except requests.Timeout:
+        return "Samokat.ru слишком долго отвечает (timeout). Попробуй позже или добавь прокси.", 504
+    except requests.RequestException as e:
+        print(f"Requests error: {str(e)}")
+        return f"Ошибка прокси: {str(e)}", 502
 
-# Старый /activate — теперь просто редирект на прокси-корень
+# Старый activate — редирект на корень с ключом
 @app.route("/activate")
 def activate():
     key = request.args.get("key", "").strip().upper()
     if not key:
-        return "Ключ обязателен в URL: /activate?key=XXXX", 400
+        return "Ключ обязателен: /activate?key=XXXX", 400
     
-    # Редирект на главную с ключом
     return f"""
     <!DOCTYPE html>
     <html lang="ru">
     <head>
         <meta charset="UTF-8">
         <meta http-equiv="refresh" content="0;url=/?key={key}">
-        <title>Загрузка...</title>
+        <title>Загрузка Самоката...</title>
+        <style>body{{background:#000;color:#fff;font-family:sans-serif;text-align:center;padding:100px;}}</style>
     </head>
-    <body style="background:#000;color:#fff;font-family:sans-serif;text-align:center;padding:100px;">
+    <body>
         <h1>Открываем Самокат...</h1>
-        <p>Секунду...</p>
+        <p>Секунду, авторизуем...</p>
     </body>
     </html>
     """, 200
 
-# Оставь здесь все свои /api/keys роуты, /api/stats и т.д. — они не мешают
-# ... твой старый код API ...
+# Оставь все свои /api/keys, /api/stats и т.д. роуты как есть ниже
+# ... твой старый API код ...
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
