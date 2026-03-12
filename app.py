@@ -4,11 +4,21 @@ import pg8000.native
 import requests
 import re
 from urllib.parse import urljoin
+from functools import lru_cache  # для кэша статических ресурсов
 
 app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 PROXY_TARGET = "https://samokat.ru"
+
+@lru_cache(maxsize=128)  # кэш на 128 ресурсов (css/js/favicons)
+def get_static_from_samokat(path):
+    try:
+        url = urljoin(PROXY_TARGET, path)
+        resp = requests.get(url, timeout=(3, 10))
+        return resp.content, resp.headers.get("content-type")
+    except:
+        return b"", "text/plain"
 
 def get_db():
     url = DATABASE_URL.replace("postgresql://", "").replace("postgres://", "")
@@ -40,11 +50,11 @@ def proxy(path):
     print(f"Proxy called: path={path}, key={key}")
 
     if not key:
-        return "Нет ключа (?key=XXXX)", 401
+        return "Нет ключа (?key=XXXX или куки sk_key)", 401
     
     session_token = get_session_token(key)
     if not session_token:
-        return "Токен не найден", 403
+        return "Токен не найден или просрочен", 403
     
     proxy_cookies = {
         "__Secure-next-auth.session-token": session_token,
@@ -59,6 +69,12 @@ def proxy(path):
     headers["Host"] = "samokat.ru"
     headers["Referer"] = "https://samokat.ru/"
     
+    # Если это статический ресурс (css/js/img) — кэшируем
+    if any(ext in path for ext in [".css", ".js", ".ico", ".png", ".jpg", ".svg", ".woff"]):
+        content, content_type = get_static_from_samokat(path)
+        if content:
+            return Response(content, mimetype=content_type or "application/octet-stream")
+    
     try:
         resp = requests.request(
             method=request.method,
@@ -67,7 +83,7 @@ def proxy(path):
             cookies=proxy_cookies,
             data=request.get_data(),
             allow_redirects=False,
-            timeout=(5, 90)  # увеличил read до 90 сек
+            timeout=(5, 15)  # быстро фейлим, если тормозит
         )
         
         print(f"Samokat status: {resp.status_code} для {target_url}")
@@ -78,7 +94,6 @@ def proxy(path):
                 loc = request.host_url.rstrip("/") + loc
             else:
                 loc = loc.replace("https://samokat.ru", request.host_url.rstrip("/"))
-                loc = loc.replace("http://samokat.ru", request.host_url.rstrip("/"))
             return Response(status=resp.status_code, headers={"Location": loc})
         
         content = resp.content
@@ -88,15 +103,10 @@ def proxy(path):
             try:
                 content = content.decode("utf-8", errors="replace")
                 
-                # Улучшенная подмена — теперь и относительные пути
                 my_host = request.host_url.rstrip("/")
                 content = re.sub(r'(https?://)?samokat\.ru(:\d+)?', my_host, content, flags=re.IGNORECASE)
                 content = content.replace("samokat.ru", request.host)
                 content = content.replace("//samokat.ru", "//" + request.host)
-                content = content.replace("/api-web.samokat.ru", "/api-web")  # если есть поддомены
-                content = content.replace('"https://samokat.ru', f'"{my_host}')
-                content = content.replace("'https://samokat.ru", f"'{my_host}")
-                
                 content = content.encode("utf-8")
             except Exception as decode_err:
                 print(f"Decode error: {decode_err}")
@@ -107,10 +117,10 @@ def proxy(path):
         return Response(content, status=resp.status_code, headers=response_headers)
     
     except requests.Timeout:
-        return "Samokat.ru таймаутит — попробуй позже", 504
+        return "Samokat тормозит — попробуй позже", 504
     except Exception as e:
         print(f"Proxy error: {str(e)}")
-        return f"Ошибка: {str(e)}", 502
+        return f"Ошибка прокси: {str(e)}", 502
 
 @app.route("/activate")
 def activate():
