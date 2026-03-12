@@ -11,16 +11,16 @@ app = Flask(__name__)
 DATABASE_URL = os.environ.get("DATABASE_URL")
 PROXY_TARGET = "https://samokat.ru"
 
-@lru_cache(maxsize=256)
+@lru_cache(maxsize=512)
 def get_cached_resource(path):
     try:
         url = urljoin(PROXY_TARGET, path)
-        resp = requests.get(url, timeout=(3, 8))
+        resp = requests.get(url, timeout=(2, 6))
         if resp.status_code == 200:
             return resp.content, resp.headers.get("content-type", "application/octet-stream")
+        return b"", "text/plain"
     except:
-        pass
-    return b"", "text/plain"
+        return b"", "text/plain"
 
 def get_db():
     url = DATABASE_URL.replace("postgresql://", "").replace("postgres://", "")
@@ -51,11 +51,12 @@ def proxy(path):
     key = request.args.get("key") or request.cookies.get("sk_key")
     print(f"Proxy called: path={path}, key={key}")
 
+    # Быстрый fail без ключа — не тратим время на спам
     if not key:
-        # Без ключа — сразу фейлим, чтобы не тратить ресурсы на спам
-        if path in ["favicon.ico", "apple-touch-icon.png"] or path.endswith((".ico", ".png", ".css", ".js")):
+        # Статические файлы — из кэша, чтобы favicon.ico не убивал
+        if path in ["favicon.ico", "apple-touch-icon.png"] or path.endswith((".ico", ".png", ".css", ".js", ".svg", ".woff")):
             content, ct = get_cached_resource(path)
-            return Response(content, mimetype=ct)
+            return Response(content, mimetype=ct or "application/octet-stream")
         return "Нет ключа (?key=XXXX или куки sk_key)", 401
     
     session_token = get_session_token(key)
@@ -75,7 +76,7 @@ def proxy(path):
     headers["Host"] = "samokat.ru"
     headers["Referer"] = "https://samokat.ru/"
     
-    # Статические файлы — из кэша
+    # Статические — из кэша
     if any(ext in path.lower() for ext in [".css", ".js", ".ico", ".png", ".jpg", ".svg", ".woff", ".ttf"]):
         content, ct = get_cached_resource(path)
         if content:
@@ -100,20 +101,25 @@ def proxy(path):
                 loc = request.host_url.rstrip("/") + loc
             else:
                 loc = loc.replace("https://samokat.ru", request.host_url.rstrip("/"))
+                loc = loc.replace("http://samokat.ru", request.host_url.rstrip("/"))
             return Response(status=resp.status_code, headers={"Location": loc})
         
         content = resp.content
         content_type = resp.headers.get("content-type", "").lower()
         
-        # Подмена только для HTML/JS/CSS — API оставляем как есть
+        # Подмена только для HTML/JS/CSS
         if "text/html" in content_type or "javascript" in content_type or "css" in content_type:
             try:
                 content = content.decode("utf-8", errors="replace")
                 
                 my_host = request.host_url.rstrip("/")
+                # Максимальная подмена
                 content = re.sub(r'(https?://)?samokat\.ru(:\d+)?', my_host, content, flags=re.IGNORECASE)
                 content = content.replace("samokat.ru", request.host)
                 content = content.replace("//samokat.ru", "//" + request.host)
+                content = content.replace("api-web.samokat.ru", request.host)
+                content = content.replace('"https://samokat.ru', f'"{my_host}')
+                content = content.replace("'https://samokat.ru", f"'{my_host}")
                 content = content.encode("utf-8")
             except Exception as decode_err:
                 print(f"Decode error: {decode_err}")
