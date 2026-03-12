@@ -44,16 +44,22 @@ def get_db():
         host, port = hostport, 5432
     return pg8000.native.Connection(user=user, password=password, host=host, port=port, database=dbname, ssl_context=True)
 
-def get_session_token(key):
+def get_tokens(key):
     key = key.upper().strip()
     try:
         conn = get_db()
-        rows = conn.run("SELECT session_token FROM keys WHERE key = :key", key=key)
+        rows = conn.run("SELECT session_token, access_token FROM keys WHERE key = :key", key=key)
         conn.close()
-        return rows[0][0] if rows else None
+        if rows:
+            return rows[0][0], rows[0][1]
+        return None, None
     except Exception as e:
         print(f"DB error: {e}")
-        return None
+        return None, None
+
+def get_session_token(key):
+    session_token, _ = get_tokens(key)
+    return session_token
 
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
@@ -106,7 +112,7 @@ def proxy(path):
             return Response(content, mimetype=ct or "application/octet-stream", status=200 if content else 404)
         return Response("Нет ключа", status=401)
 
-    session_token = get_session_token(key)
+    session_token, access_token = get_tokens(key)
     if not session_token:
         return "Токен не найден", 403
 
@@ -127,6 +133,8 @@ def proxy(path):
     headers["Referer"] = "https://samokat.ru/"
     headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     headers["Connection"] = "close"
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
 
     if any(ext in path.lower() for ext in [".css", ".js", ".ico", ".png", ".jpg", ".svg", ".woff", ".ttf"]):
         content, ct = get_cached_resource("/" + path)
