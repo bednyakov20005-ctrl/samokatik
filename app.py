@@ -26,7 +26,7 @@ def get_cached_resource(path):
     try:
         proxies = get_random_proxy()
         url = urljoin(PROXY_TARGET, path)
-        resp = requests.get(url, proxies=proxies, timeout=(5, 15))
+        resp = requests.get(url, proxies=proxies, timeout=(2, 5))
         if resp.status_code in (200, 304):
             return resp.content, resp.headers.get("content-type", "application/octet-stream")
     except:
@@ -36,8 +36,8 @@ def get_cached_resource(path):
 def get_db():
     url = DATABASE_URL.replace("postgresql://", "").replace("postgres://", "")
     userinfo, rest = url.split("@")
-    user, password = userinfo.split(":", 1)
-    hostport, dbname = rest.split("/", 1)
+    user, password = userinfo.split(":")
+    hostport, dbname = rest.split("/")
     if ":" in hostport:
         host, port = hostport.split(":")
         port = int(port)
@@ -59,81 +59,40 @@ def get_session_token(key):
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def proxy(path):
-    # ── Служебные маршруты ──────────────────────────
-    if path == "test-proxy":
-        try:
-            proxies = get_random_proxy()
-            resp = requests.get(
-                "https://samokat.ru/",
-                proxies=proxies,
-                timeout=(5, 15),
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-                allow_redirects=False,
-            )
-            return f"OK: {resp.status_code}, размер: {len(resp.content)} байт"
-        except Exception as e:
-            return f"ОШИБКА: {str(e)}", 500
-
-    if path == "session-by-key":
-        key = (request.args.get("key") or "").strip().upper()
-        partner = request.args.get("partner", "")
-        if not key:
-            return "Ключ обязателен", 400
-        token = get_session_token(key)
-        if not token:
-            return "Ключ не найден", 403
-        print(f"session-by-key: key={key}, partner={partner}")
-        resp = make_response(redirect("/"))
-        resp.set_cookie("sk_key", key, max_age=86400, secure=True, httponly=False, samesite="None")
-        return resp
-
-    if path == "activate":
-        key = request.args.get("key", "").strip().upper()
-        if not key:
-            return "Ключ обязателен", 400
-        resp = make_response(redirect("/"))
-        resp.set_cookie("sk_key", key, max_age=86400, secure=True, httponly=False, samesite="None")
-        return resp
-
-    # ── Основной прокси ─────────────────────────────
     key = request.args.get("key") or request.cookies.get("sk_key")
     print(f"Proxy called: path={path}, key={key}")
 
     if not key:
         if path in ["favicon.ico", "apple-touch-icon.png"] or path.endswith((".ico", ".png", ".css", ".js", ".svg", ".woff", ".ttf")):
-            content, ct = get_cached_resource("/" + path)
+            content, ct = get_cached_resource(path)
             return Response(content, mimetype=ct or "application/octet-stream", status=200 if content else 404)
         return Response("Нет ключа", status=401)
 
     session_token = get_session_token(key)
     if not session_token:
         return "Токен не найден", 403
-
+    
     proxy_cookies = {
         "__Secure-next-auth.session-token": session_token,
         "_sv": "SV1.18515db0-6b60-47d9-aa85-93e9af748ad6.1772916992",
     }
-
-    target_url = urljoin(PROXY_TARGET, "/" if not path else "/" + path)
-    qs = request.query_string.decode()
-    if qs:
-        qs = re.sub(r'(?:^|&)key=[^&]*', '', qs).strip('&')
-    if qs:
-        target_url += "?" + qs
-
-    headers = {k: v for k, v in request.headers.items() if k.lower() not in ["host", "content-length"]}
+    
+    target_url = urljoin(PROXY_TARGET, "/" if not path else path)
+    if request.query_string:
+        target_url += "?" + request.query_string.decode()
+    
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in ["host"]}
     headers["Host"] = "samokat.ru"
     headers["Referer"] = "https://samokat.ru/"
     headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-
+    
     if any(ext in path.lower() for ext in [".css", ".js", ".ico", ".png", ".jpg", ".svg", ".woff", ".ttf"]):
-        content, ct = get_cached_resource("/" + path)
+        content, ct = get_cached_resource(path)
         if content:
             return Response(content, mimetype=ct)
-
+    
     try:
         proxies = get_random_proxy()
-        print(f"→ {request.method} {target_url}")
         resp = requests.request(
             method=request.method,
             url=target_url,
@@ -141,12 +100,12 @@ def proxy(path):
             cookies=proxy_cookies,
             data=request.get_data(),
             allow_redirects=False,
-            timeout=(5, 30),
+            timeout=(3, 8),
             proxies=proxies
         )
-
-        print(f"← {resp.status_code} [{resp.headers.get('content-type','')}] {len(resp.content)}b")
-
+        
+        print(f"Samokat status: {resp.status_code} через {proxies['https']} для {target_url}")
+        
         if 300 <= resp.status_code < 400 and "location" in resp.headers:
             loc = resp.headers["location"]
             if loc.startswith("/"):
@@ -154,16 +113,15 @@ def proxy(path):
             else:
                 loc = loc.replace("https://samokat.ru", request.host_url.rstrip("/"))
                 loc = loc.replace("http://samokat.ru", request.host_url.rstrip("/"))
-            r = Response(status=resp.status_code, headers={"Location": loc})
-            r.headers.add("Set-Cookie", f"sk_key={key}; Path=/; Max-Age=86400; Secure; SameSite=None; HttpOnly")
-            return r
-
+            return Response(status=resp.status_code, headers={"Location": loc})
+        
         content = resp.content
         content_type = resp.headers.get("content-type", "").lower()
-
+        
         if "text/html" in content_type or "javascript" in content_type or "css" in content_type:
             try:
                 content = content.decode("utf-8", errors="replace")
+                
                 my_host = request.host_url.rstrip("/")
                 content = re.sub(r'https?://samokat\.ru(?::\d+)?', my_host, content, flags=re.IGNORECASE)
                 content = re.sub(r'//samokat\.ru(?::\d+)?', '//' + request.host, content)
@@ -174,18 +132,72 @@ def proxy(path):
                 content = content.encode("utf-8")
             except Exception as decode_err:
                 print(f"Decode error: {decode_err}")
-
-        response_headers = {k: v for k, v in resp.headers.items() if k.lower() not in ["content-encoding", "transfer-encoding", "content-length"]}
-        response_headers["Set-Cookie"] = f"sk_key={key}; Path=/; Max-Age=86400; Secure; SameSite=None; HttpOnly"
-
+        
+        response_headers = {k: v for k, v in resp.headers.items() if k.lower() not in ["content-encoding", "transfer-encoding"]}
+        response_headers["Set-Cookie"] = f'sk_key={key}; Path=/; Max-Age=86400; Secure; SameSite=None; HttpOnly'
+        
         return Response(content, status=resp.status_code, headers=response_headers)
-
+    
     except requests.Timeout:
         return "Samokat таймаутит", 504
     except Exception as e:
         print(f"Proxy error: {str(e)}")
         return f"Ошибка прокси: {str(e)}", 502
 
+@app.route("/activate")
+def activate():
+    key = request.args.get("key", "").strip().upper()
+    if not key:
+        return "Ключ обязателен", 400
+    
+    resp = make_response(redirect("/?key=" + key))
+    resp.set_cookie("sk_key", key, max_age=86400, secure=True, httponly=False, samesite="None")
+    return resp
+
+@app.route("/api/<path:path>")
+@app.route("/auth/<path:path>")
+@app.route("/confirmation/<path:path>")
+def api_proxy(path):
+    key = request.args.get("key") or request.cookies.get("sk_key")
+    print(f"API called: path={path}, key={key}")
+
+    if not key:
+        return "API требует ключ", 401
+    
+    session_token = get_session_token(key)
+    if not session_token:
+        return "Токен не найден", 403
+    
+    proxy_cookies = {"__Secure-next-auth.session-token": session_token}
+    
+    base = "https://samokat.ru/api/" if "api" in request.path else "https://samokat.ru/auth/" if "auth" in request.path else "https://samokat.ru/confirmation/"
+    target_url = urljoin(base, path)
+    if request.query_string:
+        target_url += "?" + request.query_string.decode()
+    
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in ["host"]}
+    headers["Host"] = "samokat.ru"
+    headers["Referer"] = "https://samokat.ru/"
+    
+    try:
+        proxies = get_random_proxy()
+        resp = requests.request(
+            method=request.method,
+            url=target_url,
+            headers=headers,
+            cookies=proxy_cookies,
+            data=request.get_data(),
+            allow_redirects=False,
+            timeout=(3, 8),
+            proxies=proxies
+        )
+        
+        print(f"API status: {resp.status_code} через {proxies['https']} для {target_url}")
+        
+        return Response(resp.content, status=resp.status_code, headers=dict(resp.headers))
+    except Exception as e:
+        print(f"API proxy error: {str(e)}")
+        return "API ошибка", 502
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
