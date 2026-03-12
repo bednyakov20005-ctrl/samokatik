@@ -202,3 +202,101 @@ def proxy(path):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
+
+# ── Internal API (для бота) ────────────────────────────────────
+
+from flask import jsonify
+import hashlib
+
+def check_secret():
+    return request.headers.get("X-Secret") == os.environ.get("API_SECRET", "samokat_secret_2024")
+
+@app.route("/api/keys", methods=["GET"])
+def api_list_keys():
+    if not check_secret():
+        return "Forbidden", 403
+    try:
+        conn = get_db()
+        rows = conn.run("SELECT key, phone, session_token, access_token, proxy, status, created_at FROM keys")
+        conn.close()
+        result = []
+        for r in rows:
+            result.append({
+                "key": r[0], "phone": r[1],
+                "session_token": r[2], "access_token": r[3],
+                "proxy": r[4] or "", "status": r[5] or "free",
+                "created_at": str(r[6]) if r[6] else ""
+            })
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/keys", methods=["POST"])
+def api_save_key():
+    if not check_secret():
+        return "Forbidden", 403
+    data = request.get_json()
+    try:
+        conn = get_db()
+        conn.run(
+            "INSERT INTO keys (key, phone, session_token, access_token, proxy, status, created_at) "
+            "VALUES (:key, :phone, :st, :at, :proxy, 'free', NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET session_token=:st, access_token=:at, phone=:phone, proxy=:proxy",
+            key=data["key"], phone=data["phone"],
+            st=data["session_token"], at=data.get("access_token", ""),
+            proxy=data.get("proxy", "")
+        )
+        conn.close()
+        return jsonify({"ok": True, "key": data["key"]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/keys/<key>", methods=["DELETE"])
+def api_delete_key(key):
+    if not check_secret():
+        return "Forbidden", 403
+    try:
+        conn = get_db()
+        conn.run("DELETE FROM keys WHERE key = :key", key=key.upper())
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/stats", methods=["GET"])
+def api_stats():
+    if not check_secret():
+        return "Forbidden", 403
+    try:
+        conn = get_db()
+        total = conn.run("SELECT COUNT(*) FROM keys")[0][0]
+        used  = conn.run("SELECT COUNT(*) FROM keys WHERE status = 'used'")[0][0]
+        conn.close()
+        return jsonify({"total": total, "used": used, "free": total - used})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/reset", methods=["POST"])
+def api_reset():
+    if not check_secret():
+        return "Forbidden", 403
+    try:
+        conn = get_db()
+        conn.run("UPDATE keys SET status = 'free'")
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/delete_all", methods=["POST"])
+def api_delete_all():
+    if not check_secret():
+        return "Forbidden", 403
+    try:
+        conn = get_db()
+        conn.run("DELETE FROM keys")
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
