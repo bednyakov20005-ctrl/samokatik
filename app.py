@@ -59,18 +59,22 @@ def get_session_token(key):
 @app.route("/<path:path>")
 def proxy(path):
     if path == "test-proxy":
+        results = {}
+        proxies = get_random_proxy()
+        # Тест 1: просто проверяем IP через прокси
         try:
-            proxies = get_random_proxy()
-            resp = requests.get(
-                "https://samokat.ru/",
-                proxies=proxies,
-                timeout=(5, 15),
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-                allow_redirects=False,
-            )
-            return f"OK: {resp.status_code}, размер: {len(resp.content)} байт, proxy: {list(proxies.values())[0]}"
+            r = requests.get("http://api.ipify.org", proxies=proxies, timeout=(5, 10))
+            results["ip_check"] = f"OK: {r.text}"
         except Exception as e:
-            return f"ОШИБКА: {str(e)}", 500
+            results["ip_check"] = f"FAIL: {e}"
+        # Тест 2: самокат
+        try:
+            r = requests.get("https://samokat.ru/", proxies=proxies, timeout=(5, 15),
+                             headers={"User-Agent": "Mozilla/5.0"}, allow_redirects=False)
+            results["samokat"] = f"OK: {r.status_code}, {len(r.content)}b"
+        except Exception as e:
+            results["samokat"] = f"FAIL: {e}"
+        return f"Proxy: {list(proxies.values())[0]}\n\n" + "\n".join(f"{k}: {v}" for k, v in results.items())
 
     if path == "session-by-key":
         key = (request.args.get("key") or "").strip().upper()
