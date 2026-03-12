@@ -12,14 +12,20 @@ app = Flask(__name__)
 DATABASE_URL = os.environ.get("DATABASE_URL")
 PROXY_TARGET = "https://samokat.ru"
 
+PROXY_LIST = [
+    "http://0ktuhalt9j-res-country-RU-state-536203-city-498817-hold-session-session-69b3036213658:BHOdByDtlrFaqcH0@lpm-shared-44.asocks-servers.net:443",
+]
+
 def get_random_proxy():
-    return {}  # прокси отключены
+    proxy_str = random.choice(PROXY_LIST)
+    return {"http": proxy_str, "https": proxy_str}
 
 @lru_cache(maxsize=512)
 def get_cached_resource(path):
     try:
+        proxies = get_random_proxy()
         url = urljoin(PROXY_TARGET, path)
-        resp = requests.get(url, timeout=(5, 15))
+        resp = requests.get(url, proxies=proxies, timeout=(5, 15))
         if resp.status_code in (200, 304):
             return resp.content, resp.headers.get("content-type", "application/octet-stream")
     except:
@@ -54,13 +60,15 @@ def get_session_token(key):
 def proxy(path):
     if path == "test-proxy":
         try:
+            proxies = get_random_proxy()
             resp = requests.get(
                 "https://samokat.ru/",
+                proxies=proxies,
                 timeout=(5, 15),
                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
                 allow_redirects=False,
             )
-            return f"OK: {resp.status_code}, размер: {len(resp.content)} байт"
+            return f"OK: {resp.status_code}, размер: {len(resp.content)} байт, proxy: {list(proxies.values())[0]}"
         except Exception as e:
             return f"ОШИБКА: {str(e)}", 500
 
@@ -121,7 +129,8 @@ def proxy(path):
             return Response(content, mimetype=ct)
 
     try:
-        print(f"→ {request.method} {target_url}")
+        proxies = get_random_proxy()
+        print(f"→ {request.method} {target_url} via {list(proxies.values())[0]}")
         resp = requests.request(
             method=request.method,
             url=target_url,
@@ -130,6 +139,7 @@ def proxy(path):
             data=request.get_data(),
             allow_redirects=False,
             timeout=(5, 30),
+            proxies=proxies
         )
 
         print(f"← {resp.status_code} [{resp.headers.get('content-type','')}] {len(resp.content)}b")
