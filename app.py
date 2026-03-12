@@ -12,11 +12,9 @@ app = Flask(__name__)
 DATABASE_URL = os.environ.get("DATABASE_URL")
 PROXY_TARGET = "https://samokat.ru"
 
-# Список прокси — добавляй свои
 PROXY_LIST = [
     "socks5://0ktuhalt9j-res-country-RU-state-536203-city-498817-hold-session-session-69b3036213658:BHOdByDtlrFaqcH0@62.112.8.229:443",
-    # "socks5://login2:pass2@ip2:port2",
-    # "socks5://login3:pass3@ip3:port3",
+    # Добавь остальные свои прокси сюда
 ]
 
 def get_random_proxy():
@@ -64,7 +62,6 @@ def proxy(path):
     key = request.args.get("key") or request.cookies.get("sk_key")
     print(f"Proxy called: path={path}, key={key}")
 
-    # Быстрый fail без ключа — спасает от спама
     if not key:
         if path in ["favicon.ico", "apple-touch-icon.png"] or path.endswith((".ico", ".png", ".css", ".js", ".svg", ".woff", ".ttf")):
             content, ct = get_cached_resource(path)
@@ -73,7 +70,7 @@ def proxy(path):
 
     session_token = get_session_token(key)
     if not session_token:
-        return "Токен не найден или просрочен", 403
+        return "Токен не найден", 403
     
     proxy_cookies = {
         "__Secure-next-auth.session-token": session_token,
@@ -89,7 +86,6 @@ def proxy(path):
     headers["Referer"] = "https://samokat.ru/"
     headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     
-    # Статические — кэш
     if any(ext in path.lower() for ext in [".css", ".js", ".ico", ".png", ".jpg", ".svg", ".woff", ".ttf"]):
         content, ct = get_cached_resource(path)
         if content:
@@ -104,7 +100,7 @@ def proxy(path):
             cookies=proxy_cookies,
             data=request.get_data(),
             allow_redirects=False,
-            timeout=(4, 10),  # агрессивно короткий таймаут
+            timeout=(3, 8),
             proxies=proxies
         )
         
@@ -138,7 +134,7 @@ def proxy(path):
                 print(f"Decode error: {decode_err}")
         
         response_headers = {k: v for k, v in resp.headers.items() if k.lower() not in ["content-encoding", "transfer-encoding"]}
-        response_headers["Set-Cookie"] = f'sk_key={key}; Path=/; Max-Age=86400; Secure; SameSite=Lax; HttpOnly'
+        response_headers["Set-Cookie"] = f'sk_key={key}; Path=/; Max-Age=86400; Secure; SameSite=None; HttpOnly'
         
         return Response(content, status=resp.status_code, headers=response_headers)
     
@@ -155,7 +151,7 @@ def activate():
         return "Ключ обязателен", 400
     
     resp = make_response(redirect("/?key=" + key))
-    resp.set_cookie("sk_key", key, max_age=86400, secure=True, httponly=False, samesite="None")  # httponly=False для теста, чтобы JS видел куки
+    resp.set_cookie("sk_key", key, max_age=86400, secure=True, httponly=False, samesite="None")
     return resp
 
 @app.route("/api/<path:path>")
@@ -192,7 +188,7 @@ def api_proxy(path):
             cookies=proxy_cookies,
             data=request.get_data(),
             allow_redirects=False,
-            timeout=(4, 10),
+            timeout=(3, 8),
             proxies=proxies
         )
         
