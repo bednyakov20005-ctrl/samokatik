@@ -16,7 +16,7 @@ def get_cached_resource(path):
     try:
         url = urljoin(PROXY_TARGET, path)
         resp = requests.get(url, timeout=(2, 6))
-        if resp.status_code == 200:
+        if resp.status_code in (200, 304):
             return resp.content, resp.headers.get("content-type", "application/octet-stream")
     except:
         pass
@@ -51,13 +51,11 @@ def proxy(path):
     key = request.args.get("key") or request.cookies.get("sk_key")
     print(f"Proxy called: path={path}, key={key}")
 
-    # Без ключа — быстрый fail или кэш статики
+    # Без ключа — быстрый fail или кэш статики (самое важное!)
     if not key:
         if path in ["favicon.ico", "apple-touch-icon.png"] or path.endswith((".ico", ".png", ".css", ".js", ".svg", ".woff", ".ttf")):
             content, ct = get_cached_resource(path)
-            return Response(content, mimetype=ct or "application/octet-stream")
-        if "api" in path or "auth" in path or "csrf" in path:
-            return "API требует ключ", 401
+            return Response(content, mimetype=ct or "application/octet-stream", status=200 if content else 404)
         return "Нет ключа (?key=XXXX или куки sk_key)", 401
     
     session_token = get_session_token(key)
@@ -77,7 +75,7 @@ def proxy(path):
     headers["Host"] = "samokat.ru"
     headers["Referer"] = "https://samokat.ru/"
     
-    # Статические ресурсы — из кэша
+    # Статические — из кэша
     if any(ext in path.lower() for ext in [".css", ".js", ".ico", ".png", ".jpg", ".svg", ".woff", ".ttf"]):
         content, ct = get_cached_resource(path)
         if content:
@@ -146,10 +144,13 @@ def activate():
 
 @app.route("/api/<path:path>")
 @app.route("/auth/<path:path>")
+@app.route("/confirmation/<path:path>")
 def api_proxy(path):
     key = request.args.get("key") or request.cookies.get("sk_key")
+    print(f"API called: path={path}, key={key}")
+
     if not key:
-        return "API требует ключ", 401
+        return "API требует ключ (куки sk_key или ?key=)", 401
     
     session_token = get_session_token(key)
     if not session_token:
@@ -157,13 +158,23 @@ def api_proxy(path):
     
     proxy_cookies = {"__Secure-next-auth.session-token": session_token}
     
-    base = "https://samokat.ru/api/" if "api" in request.path else "https://samokat.ru/auth/"
+    # Определяем базу для API/auth/confirmation
+    if "api" in request.path:
+        base = "https://samokat.ru/api/"
+    elif "auth" in request.path:
+        base = "https://samokat.ru/auth/"
+    elif "confirmation" in request.path:
+        base = "https://samokat.ru/confirmation/"
+    else:
+        base = PROXY_TARGET
+    
     target_url = urljoin(base, path)
     if request.query_string:
         target_url += "?" + request.query_string.decode()
     
     headers = {k: v for k, v in request.headers.items() if k.lower() not in ["host"]}
     headers["Host"] = "samokat.ru"
+    headers["Referer"] = "https://samokat.ru/"
     
     try:
         resp = requests.request(
@@ -175,6 +186,9 @@ def api_proxy(path):
             allow_redirects=False,
             timeout=(4, 12)
         )
+        
+        print(f"API status: {resp.status_code} для {target_url}")
+        
         return Response(resp.content, status=resp.status_code, headers=dict(resp.headers))
     except Exception as e:
         print(f"API proxy error: {str(e)}")
