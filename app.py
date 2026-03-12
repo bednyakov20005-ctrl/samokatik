@@ -13,7 +13,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 PROXY_TARGET = "https://samokat.ru"
 
 PROXY_LIST = [
-    "http://0ktuhalt9j-res-country-RU-state-536203-city-498817-hold-session-session-69b3036213658:BHOdByDtlrFaqcH0@lpm-shared-44.asocks-servers.net:443",
+    "http://0ktuhalt9j-res-country-RU-state-536203-city-498817-hold-session-session-69b3036213658:BHOdByDtlrFaqcH0@62.112.8.229:80",
 ]
 
 def get_random_proxy():
