@@ -4,21 +4,23 @@ import pg8000.native
 import requests
 import re
 from urllib.parse import urljoin
-from functools import lru_cache  # для кэша статических ресурсов
+from functools import lru_cache
 
 app = Flask(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 PROXY_TARGET = "https://samokat.ru"
 
-@lru_cache(maxsize=128)  # кэш на 128 ресурсов (css/js/favicons)
-def get_static_from_samokat(path):
+@lru_cache(maxsize=256)
+def get_cached_resource(path):
     try:
         url = urljoin(PROXY_TARGET, path)
-        resp = requests.get(url, timeout=(3, 10))
-        return resp.content, resp.headers.get("content-type")
+        resp = requests.get(url, timeout=(3, 8))
+        if resp.status_code == 200:
+            return resp.content, resp.headers.get("content-type", "application/octet-stream")
     except:
-        return b"", "text/plain"
+        pass
+    return b"", "text/plain"
 
 def get_db():
     url = DATABASE_URL.replace("postgresql://", "").replace("postgres://", "")
@@ -50,6 +52,10 @@ def proxy(path):
     print(f"Proxy called: path={path}, key={key}")
 
     if not key:
+        # Без ключа — сразу фейлим, чтобы не тратить ресурсы на спам
+        if path in ["favicon.ico", "apple-touch-icon.png"] or path.endswith((".ico", ".png", ".css", ".js")):
+            content, ct = get_cached_resource(path)
+            return Response(content, mimetype=ct)
         return "Нет ключа (?key=XXXX или куки sk_key)", 401
     
     session_token = get_session_token(key)
@@ -65,15 +71,15 @@ def proxy(path):
     if request.query_string:
         target_url += "?" + request.query_string.decode()
     
-    headers = {k: v for k, v in request.headers if k.lower() not in ["host"]}
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in ["host"]}
     headers["Host"] = "samokat.ru"
     headers["Referer"] = "https://samokat.ru/"
     
-    # Если это статический ресурс (css/js/img) — кэшируем
-    if any(ext in path for ext in [".css", ".js", ".ico", ".png", ".jpg", ".svg", ".woff"]):
-        content, content_type = get_static_from_samokat(path)
+    # Статические файлы — из кэша
+    if any(ext in path.lower() for ext in [".css", ".js", ".ico", ".png", ".jpg", ".svg", ".woff", ".ttf"]):
+        content, ct = get_cached_resource(path)
         if content:
-            return Response(content, mimetype=content_type or "application/octet-stream")
+            return Response(content, mimetype=ct)
     
     try:
         resp = requests.request(
@@ -83,7 +89,7 @@ def proxy(path):
             cookies=proxy_cookies,
             data=request.get_data(),
             allow_redirects=False,
-            timeout=(5, 15)  # быстро фейлим, если тормозит
+            timeout=(4, 12)  # быстро фейлим, если тормозит
         )
         
         print(f"Samokat status: {resp.status_code} для {target_url}")
@@ -99,6 +105,7 @@ def proxy(path):
         content = resp.content
         content_type = resp.headers.get("content-type", "").lower()
         
+        # Подмена только для HTML/JS/CSS — API оставляем как есть
         if "text/html" in content_type or "javascript" in content_type or "css" in content_type:
             try:
                 content = content.decode("utf-8", errors="replace")
