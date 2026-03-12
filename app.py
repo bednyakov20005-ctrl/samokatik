@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import os
-import psycopg2
-import psycopg2.extras
+import pg8000.native
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -9,11 +8,22 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 API_SECRET   = os.environ.get("API_SECRET", "samokat_secret_2024")
 
 def get_db():
-    return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    # Parse DATABASE_URL: postgresql://user:pass@host:port/dbname
+    url = DATABASE_URL
+    url = url.replace("postgresql://", "").replace("postgres://", "")
+    userinfo, rest = url.split("@")
+    user, password = userinfo.split(":")
+    hostport, dbname = rest.split("/")
+    if ":" in hostport:
+        host, port = hostport.split(":")
+        port = int(port)
+    else:
+        host, port = hostport, 5432
+    return pg8000.native.Connection(user=user, password=password, host=host, port=port, database=dbname, ssl_context=True)
 
 def init_db():
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("""
+    conn = get_db()
+    conn.run("""
         CREATE TABLE IF NOT EXISTS keys (
             key           TEXT PRIMARY KEY,
             phone         TEXT,
@@ -25,7 +35,7 @@ def init_db():
             used_at       TEXT
         )
     """)
-    conn.commit(); cur.close(); conn.close()
+    conn.close()
 
 HTML_ACTIVATE = """<!DOCTYPE html>
 <html lang="ru">
@@ -78,15 +88,14 @@ def activate():
     if not key:
         return HTML_ERROR.format(icon="❌", title="Нет ключа", msg="Ключ не указан в ссылке"), 400
     try:
-        conn = get_db(); cur = conn.cursor()
-        cur.execute("SELECT * FROM keys WHERE key=%s", (key,))
-        row = cur.fetchone()
-        cur.close(); conn.close()
+        conn = get_db()
+        rows = conn.run("SELECT session_token FROM keys WHERE key=:key", key=key)
+        conn.close()
     except Exception as e:
         return HTML_ERROR.format(icon="⚠️", title="Ошибка", msg=str(e)), 500
-    if not row:
+    if not rows:
         return HTML_ERROR.format(icon="🔍", title="Ключ не найден", msg="Проверь ключ и попробуй снова"), 404
-    return HTML_ACTIVATE.format(token=row["session_token"]), 200
+    return HTML_ACTIVATE.format(token=rows[0][0]), 200
 
 def auth():
     return request.headers.get("X-Secret") == API_SECRET
@@ -94,58 +103,58 @@ def auth():
 @app.route("/api/keys", methods=["GET"])
 def api_list():
     if not auth(): return jsonify({"error":"forbidden"}), 403
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("SELECT key,phone,proxy,status,created_at FROM keys ORDER BY created_at DESC")
-    rows = [dict(r) for r in cur.fetchall()]
-    cur.close(); conn.close()
-    return jsonify(rows)
+    conn = get_db()
+    rows = conn.run("SELECT key,phone,proxy,status,created_at FROM keys ORDER BY created_at DESC")
+    conn.close()
+    return jsonify([{"key":r[0],"phone":r[1],"proxy":r[2],"status":r[3],"created_at":r[4]} for r in rows])
 
 @app.route("/api/keys", methods=["POST"])
 def api_add():
     if not auth(): return jsonify({"error":"forbidden"}), 403
     d = request.json
-    conn = get_db(); cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO keys (key,phone,session_token,access_token,proxy,status,created_at) VALUES (%s,%s,%s,%s,%s,'free',%s) ON CONFLICT (key) DO NOTHING",
-        (d["key"], d["phone"], d["session_token"], d.get("access_token",""), d.get("proxy",""), d["created_at"])
+    conn = get_db()
+    conn.run(
+        "INSERT INTO keys (key,phone,session_token,access_token,proxy,status,created_at) VALUES (:key,:phone,:st,:at,:proxy,'free',:ca) ON CONFLICT (key) DO NOTHING",
+        key=d["key"], phone=d["phone"], st=d["session_token"],
+        at=d.get("access_token",""), proxy=d.get("proxy",""), ca=d["created_at"]
     )
-    conn.commit(); cur.close(); conn.close()
+    conn.close()
     return jsonify({"ok": True})
 
 @app.route("/api/keys/<key>", methods=["DELETE"])
 def api_delete(key):
     if not auth(): return jsonify({"error":"forbidden"}), 403
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("DELETE FROM keys WHERE key=%s", (key,))
-    conn.commit(); cur.close(); conn.close()
+    conn = get_db()
+    conn.run("DELETE FROM keys WHERE key=:key", key=key)
+    conn.close()
     return jsonify({"ok": True})
 
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
     if not auth(): return jsonify({"error":"forbidden"}), 403
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("UPDATE keys SET status='free', used_at=NULL")
-    conn.commit(); cur.close(); conn.close()
+    conn = get_db()
+    conn.run("UPDATE keys SET status='free', used_at=NULL")
+    conn.close()
     return jsonify({"ok": True})
 
 @app.route("/api/delete_all", methods=["POST"])
 def api_delete_all():
     if not auth(): return jsonify({"error":"forbidden"}), 403
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("DELETE FROM keys")
-    conn.commit(); cur.close(); conn.close()
+    conn = get_db()
+    conn.run("DELETE FROM keys")
+    conn.close()
     return jsonify({"ok": True})
 
 @app.route("/api/stats", methods=["GET"])
 def api_stats():
     if not auth(): return jsonify({"error":"forbidden"}), 403
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("SELECT status, COUNT(*) as cnt FROM keys GROUP BY status")
+    conn = get_db()
+    rows = conn.run("SELECT status, COUNT(*) FROM keys GROUP BY status")
+    conn.close()
     result = {"free": 0, "used": 0, "total": 0}
-    for r in cur.fetchall():
-        result[r["status"]] = r["cnt"]
-        result["total"] += r["cnt"]
-    cur.close(); conn.close()
+    for r in rows:
+        result[r[0]] = r[1]
+        result["total"] += r[1]
     return jsonify(result)
 
 init_db()
