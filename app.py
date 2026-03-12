@@ -95,7 +95,7 @@ def activate():
         return HTML_ERROR.format(icon="⚠️", title="Ошибка", msg=str(e)), 500
     if not rows:
         return HTML_ERROR.format(icon="🔍", title="Ключ не найден", msg="Проверь ключ и попробуй снова"), 404
-    return HTML_ACTIVATE.format(token=rows[0][0]), 200
+    return HTML_ACTIVATE.replace("{token}", rows[0][0]), 200
 
 def auth():
     return request.headers.get("X-Secret") == API_SECRET
