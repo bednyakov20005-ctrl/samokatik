@@ -60,8 +60,6 @@ def proxy(path):
         if path in ["favicon.ico", "apple-touch-icon.png"] or path.endswith((".ico", ".png", ".css", ".js", ".svg", ".woff", ".ttf")):
             content, ct = get_cached_resource(path)
             return Response(content, mimetype=ct or "application/octet-stream", status=200 if content else 404)
-        if "api" in path or "auth" in path or "csrf" in path:
-            return Response("API требует ключ", status=401)
         return "Нет ключа (?key=XXXX или куки sk_key)", 401
     
     session_token = get_session_token(key)
@@ -97,7 +95,7 @@ def proxy(path):
             data=request.get_data(),
             allow_redirects=False,
             timeout=(4, 12),
-            proxies=PROXIES  # ← твой прокси здесь
+            proxies=PROXIES
         )
         
         print(f"Samokat status: {resp.status_code} через прокси для {target_url}")
