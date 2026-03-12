@@ -11,11 +11,15 @@ app = Flask(__name__)
 DATABASE_URL = os.environ.get("DATABASE_URL")
 PROXY_TARGET = "https://samokat.ru"
 
+# Твой прокси (можно добавить список и рандомить)
+PROXY = "socks5://0ktuhalt9j-res-country-RU-state-536203-city-498817-hold-session-session-69b3036213658:BHOdByDtlrFaqcH0@62.112.8.229:443"
+PROXIES = {"http": PROXY, "https": PROXY}
+
 @lru_cache(maxsize=512)
 def get_cached_resource(path):
     try:
         url = urljoin(PROXY_TARGET, path)
-        resp = requests.get(url, timeout=(2, 6))
+        resp = requests.get(url, proxies=PROXIES, timeout=(2, 6))
         if resp.status_code in (200, 304):
             return resp.content, resp.headers.get("content-type", "application/octet-stream")
     except:
@@ -51,11 +55,13 @@ def proxy(path):
     key = request.args.get("key") or request.cookies.get("sk_key")
     print(f"Proxy called: path={path}, key={key}")
 
-    # Без ключа — быстрый fail или кэш статики (самое важное!)
+    # Без ключа — статика из кэша или быстрый фейл
     if not key:
         if path in ["favicon.ico", "apple-touch-icon.png"] or path.endswith((".ico", ".png", ".css", ".js", ".svg", ".woff", ".ttf")):
             content, ct = get_cached_resource(path)
             return Response(content, mimetype=ct or "application/octet-stream", status=200 if content else 404)
+        if "api" in path or "auth" in path or "csrf" in path:
+            return Response("API требует ключ", status=401)
         return "Нет ключа (?key=XXXX или куки sk_key)", 401
     
     session_token = get_session_token(key)
@@ -74,8 +80,9 @@ def proxy(path):
     headers = {k: v for k, v in request.headers.items() if k.lower() not in ["host"]}
     headers["Host"] = "samokat.ru"
     headers["Referer"] = "https://samokat.ru/"
+    headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     
-    # Статические — из кэша
+    # Статические — кэш
     if any(ext in path.lower() for ext in [".css", ".js", ".ico", ".png", ".jpg", ".svg", ".woff", ".ttf"]):
         content, ct = get_cached_resource(path)
         if content:
@@ -89,10 +96,11 @@ def proxy(path):
             cookies=proxy_cookies,
             data=request.get_data(),
             allow_redirects=False,
-            timeout=(4, 12)
+            timeout=(4, 12),
+            proxies=PROXIES  # ← твой прокси здесь
         )
         
-        print(f"Samokat status: {resp.status_code} для {target_url}")
+        print(f"Samokat status: {resp.status_code} через прокси для {target_url}")
         
         if 300 <= resp.status_code < 400 and "location" in resp.headers:
             loc = resp.headers["location"]
@@ -150,7 +158,7 @@ def api_proxy(path):
     print(f"API called: path={path}, key={key}")
 
     if not key:
-        return "API требует ключ (куки sk_key или ?key=)", 401
+        return "API требует ключ", 401
     
     session_token = get_session_token(key)
     if not session_token:
@@ -158,16 +166,7 @@ def api_proxy(path):
     
     proxy_cookies = {"__Secure-next-auth.session-token": session_token}
     
-    # Определяем базу для API/auth/confirmation
-    if "api" in request.path:
-        base = "https://samokat.ru/api/"
-    elif "auth" in request.path:
-        base = "https://samokat.ru/auth/"
-    elif "confirmation" in request.path:
-        base = "https://samokat.ru/confirmation/"
-    else:
-        base = PROXY_TARGET
-    
+    base = "https://samokat.ru/api/" if "api" in request.path else "https://samokat.ru/auth/" if "auth" in request.path else "https://samokat.ru/confirmation/"
     target_url = urljoin(base, path)
     if request.query_string:
         target_url += "?" + request.query_string.decode()
@@ -184,7 +183,8 @@ def api_proxy(path):
             cookies=proxy_cookies,
             data=request.get_data(),
             allow_redirects=False,
-            timeout=(4, 12)
+            timeout=(4, 12),
+            proxies=PROXIES
         )
         
         print(f"API status: {resp.status_code} для {target_url}")
