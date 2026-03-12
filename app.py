@@ -24,13 +24,7 @@ def get_random_proxy():
     proxy_str = random.choice(PROXY_LIST)
     return {"http": proxy_str, "https": proxy_str}
 
-def build_proxy_cookies(session_token):
-    return {
-        "__Secure-next-auth.session-token": session_token,
-        "_sv": "SV1.18515db0-6b60-47d9-aa85-93e9af748ad6.1772916992",
-    }
-
-def build_headers(incoming_headers):
+def build_headers(incoming_headers, jwt_token=None):
     headers = {k: v for k, v in incoming_headers.items() if k.lower() not in SKIP_REQ_HEADERS}
     headers["Host"] = "samokat.ru"
     headers["Referer"] = "https://samokat.ru/"
@@ -41,6 +35,8 @@ def build_headers(incoming_headers):
     headers["Sec-Fetch-Site"] = "same-origin"
     headers["Sec-Fetch-Mode"] = "navigate"
     headers["Sec-Fetch-Dest"] = "document"
+    if jwt_token:
+        headers["Authorization"] = f"Bearer {jwt_token}"
     return headers
 
 @lru_cache(maxsize=512)
@@ -101,8 +97,7 @@ def do_proxy_request(target_url, session_token, key, strip_key_from_qs=True):
     my_origin = request.host_url.rstrip("/")
     my_host = request.host
 
-    headers = build_headers(request.headers)
-    cookies = build_proxy_cookies(session_token)
+    headers = build_headers(request.headers, jwt_token=session_token)
     proxies = get_random_proxy()
 
     # Убираем key= из query string чтобы не слать самокату
@@ -118,7 +113,6 @@ def do_proxy_request(target_url, session_token, key, strip_key_from_qs=True):
         method=request.method,
         url=target_url,
         headers=headers,
-        cookies=cookies,
         data=request.get_data(),
         allow_redirects=False,
         timeout=(5, 30),
