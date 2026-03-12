@@ -1,4 +1,4 @@
-from flask import Flask, request, Response, make_response, redirect
+from flask import Flask, request, Response
 import os
 import pg8000.native
 import requests
@@ -37,19 +37,18 @@ def get_session_token(key):
 @app.route("/<path:path>")
 def proxy(path):
     key = request.args.get("key") or request.cookies.get("sk_key")
-    print(f"Proxy called: path={path}, key={key}")  # для логов Railway
+    print(f"Proxy called: path={path}, key={key}")
 
     if not key:
-        return "Нет ключа (?key=XXXX или куки sk_key)", 401
+        return "Нет ключа (?key=XXXX)", 401
     
     session_token = get_session_token(key)
     if not session_token:
-        return "Токен не найден или просрочен", 403
+        return "Токен не найден", 403
     
     proxy_cookies = {
         "__Secure-next-auth.session-token": session_token,
-        "_sv": "SV1.18515db0-6b60-47d9-aa85-93e9af748ad6.1772916992",  # антифрод
-        # Добавь сюда другие куки из твоего снифа/дампа, если нужно
+        "_sv": "SV1.18515db0-6b60-47d9-aa85-93e9af748ad6.1772916992",
     }
     
     target_url = urljoin(PROXY_TARGET, "/" if not path else path)
@@ -68,7 +67,7 @@ def proxy(path):
             cookies=proxy_cookies,
             data=request.get_data(),
             allow_redirects=False,
-            timeout=(5, 60)
+            timeout=(5, 90)  # увеличил read до 90 сек
         )
         
         print(f"Samokat status: {resp.status_code} для {target_url}")
@@ -79,29 +78,39 @@ def proxy(path):
                 loc = request.host_url.rstrip("/") + loc
             else:
                 loc = loc.replace("https://samokat.ru", request.host_url.rstrip("/"))
+                loc = loc.replace("http://samokat.ru", request.host_url.rstrip("/"))
             return Response(status=resp.status_code, headers={"Location": loc})
         
         content = resp.content
         content_type = resp.headers.get("content-type", "").lower()
         
-        if "text/html" in content_type or "javascript" in content_type:
+        if "text/html" in content_type or "javascript" in content_type or "css" in content_type:
             try:
                 content = content.decode("utf-8", errors="replace")
-                content = re.sub(r'(https?://)?samokat\.ru', request.host, content, flags=re.IGNORECASE)
+                
+                # Улучшенная подмена — теперь и относительные пути
+                my_host = request.host_url.rstrip("/")
+                content = re.sub(r'(https?://)?samokat\.ru(:\d+)?', my_host, content, flags=re.IGNORECASE)
                 content = content.replace("samokat.ru", request.host)
                 content = content.replace("//samokat.ru", "//" + request.host)
+                content = content.replace("/api-web.samokat.ru", "/api-web")  # если есть поддомены
+                content = content.replace('"https://samokat.ru', f'"{my_host}')
+                content = content.replace("'https://samokat.ru", f"'{my_host}")
+                
                 content = content.encode("utf-8")
-            except:
-                pass
+            except Exception as decode_err:
+                print(f"Decode error: {decode_err}")
         
         response_headers = {k: v for k, v in resp.headers.items() if k.lower() not in ["content-encoding", "transfer-encoding"]}
         response_headers["Set-Cookie"] = f'sk_key={key}; Path=/; Max-Age=86400; Secure; SameSite=Lax; HttpOnly'
         
         return Response(content, status=resp.status_code, headers=response_headers)
     
+    except requests.Timeout:
+        return "Samokat.ru таймаутит — попробуй позже", 504
     except Exception as e:
         print(f"Proxy error: {str(e)}")
-        return f"Ошибка прокси: {str(e)}", 502
+        return f"Ошибка: {str(e)}", 502
 
 @app.route("/activate")
 def activate():
@@ -109,7 +118,6 @@ def activate():
     if not key:
         return "Ключ обязателен", 400
     
-    # Редирект + set-cookie
     resp = make_response(redirect("/?key=" + key))
     resp.set_cookie("sk_key", key, max_age=86400, secure=True, httponly=True, samesite="Lax")
     return resp
